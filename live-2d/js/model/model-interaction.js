@@ -14,6 +14,10 @@ class ModelInteractionController {
         this.dragOffset = { x: 0, y: 0 };
         this.chatDragOffset = { x: 0, y: 0 };
         this.config = null;
+        this.crossDisplayTransferInFlight = false;
+        this.lastCrossDisplayTransferAt = 0;
+        this.crossDisplayTransferCooldownMs = 300;
+        this.crossDisplayEdgeThreshold = 32;
     }
 
     // 初始化模型和应用
@@ -33,6 +37,40 @@ class ModelInteractionController {
         this.interactionHeight = this.model.height * 0.7;
         this.interactionX = this.model.x + (this.model.width - this.interactionWidth) / 2;
         this.interactionY = this.model.y + (this.model.height - this.interactionHeight) / 2;
+    }
+
+    getCanvasMetrics() {
+        if (!this.app || !this.app.renderer || !this.app.renderer.view) {
+            return null;
+        }
+
+        const view = this.app.renderer.view;
+        const rect = view.getBoundingClientRect();
+        if (!rect.width || !rect.height) {
+            return null;
+        }
+
+        return {
+            rect,
+            scaleX: view.width / rect.width,
+            scaleY: view.height / rect.height
+        };
+    }
+
+    toWindowPixels(point) {
+        const metrics = this.getCanvasMetrics();
+        if (!metrics) {
+            return { x: point.x, y: point.y };
+        }
+
+        return {
+            x: point.x / metrics.scaleX,
+            y: point.y / metrics.scaleY
+        };
+    }
+
+    modelPositionToWindowPixels() {
+        return this.toWindowPixels({ x: this.model.x, y: this.model.y });
     }
 
     // 设置交互性
@@ -88,10 +126,17 @@ class ModelInteractionController {
         // 鼠标按下事件
         this.model.on('mousedown', (e) => {
             const point = e.data.global;
+            const windowPoint = this.toWindowPixels(point);
             if (this.model.containsPoint(point)) {
                 this.isDragging = true;
                 this.dragOffset.x = point.x - this.model.x;
                 this.dragOffset.y = point.y - this.model.y;
+                console.log('[multi-monitor] drag start:', {
+                    pointer: { x: point.x, y: point.y },
+                    windowPointer: windowPoint,
+                    dragOffset: this.dragOffset,
+                    modelPosition: { x: this.model.x, y: this.model.y }
+                });
                 ipcRenderer.send('set-ignore-mouse-events', {
                     ignore: false
                 });
@@ -100,18 +145,23 @@ class ModelInteractionController {
         });
 
         // 鼠标移动事件
-        this.model.on('mousemove', (e) => {
+        this.model.on('mousemove', async (e) => {
             if (this.isDragging) {
                 const newX = e.data.global.x - this.dragOffset.x;
                 const newY = e.data.global.y - this.dragOffset.y;
                 this.model.position.set(newX, newY);
                 this.updateInteractionArea();
+                await this.maybeTransferAcrossDisplays(e.data.global);
             }
         });
 
         // 全局鼠标释放事件
         window.addEventListener('mouseup', () => {
             if (this.isDragging) {
+                console.log('[multi-monitor] drag end:', {
+                    modelPosition: { x: this.model.x, y: this.model.y },
+                    windowModelPosition: this.modelPositionToWindowPixels()
+                });
                 this.isDragging = false;
                 // 保存模型位置
                 this.saveModelPosition();
@@ -245,6 +295,12 @@ class ModelInteractionController {
         // 窗口大小改变事件
         window.addEventListener('resize', () => {
             if (this.app && this.app.renderer) {
+                console.log('[multi-monitor] renderer resize:', {
+                    width: window.innerWidth,
+                    height: window.innerHeight,
+                    modelPosition: { x: this.model?.x, y: this.model?.y },
+                    windowModelPosition: this.model ? this.modelPositionToWindowPixels() : null
+                });
                 this.app.renderer.resize(window.innerWidth * 2, window.innerHeight * 2);
                 this.app.stage.position.set(window.innerWidth / 2, window.innerHeight / 2);
                 this.app.stage.pivot.set(window.innerWidth / 2, window.innerHeight / 2);
@@ -306,11 +362,16 @@ class ModelInteractionController {
         // 检查是否有保存的位置
         if (this.config && this.config.ui && this.config.ui.model_position && this.config.ui.model_position.remember_position) {
             const savedPos = this.config.ui.model_position;
-            if (savedPos.x !== null && savedPos.y !== null) {
-                // 使用保存的位置（相对比例转换为绝对坐标）
-                this.model.x = savedPos.x * window.innerWidth;
-                this.model.y = savedPos.y * window.innerHeight;
-                console.log('加载保存的模型位置:', { x: this.model.x, y: this.model.y });
+            const relativePosition = savedPos.display_relative || savedPos;
+            if (relativePosition.x !== null && relativePosition.y !== null) {
+                // 使用保存的位置（相对显示器工作区的比例转换为当前窗口局部坐标）
+                this.model.x = relativePosition.x * window.innerWidth;
+                this.model.y = relativePosition.y * window.innerHeight;
+                console.log('[multi-monitor] restored model position:', {
+                    savedPosition: savedPos,
+                    resolvedPosition: { x: this.model.x, y: this.model.y },
+                    windowSize: { width: window.innerWidth, height: window.innerHeight }
+                });
             } else {
                 // 使用默认位置
                 this.model.y = window.innerHeight * 0.8;
@@ -322,6 +383,7 @@ class ModelInteractionController {
             this.model.x = window.innerWidth * 1.35;
         }
 
+        this.clampModelToVisibleArea('initial-restore');
         this.updateInteractionArea();
     }
 
@@ -334,22 +396,129 @@ class ModelInteractionController {
             return;
         }
 
-        // 计算相对位置（0-1之间的比例）
-        const relativeX = this.model.x / window.innerWidth;
-        const relativeY = this.model.y / window.innerHeight;
+        this.clampModelToVisibleArea('save');
 
-        // 更新配置对象
+        const modelWindowPosition = this.modelPositionToWindowPixels();
+        const relativeX = modelWindowPosition.x / window.innerWidth;
+        const relativeY = modelWindowPosition.y / window.innerHeight;
+
+        // 更新配置对象，兼容新旧结构
+        this.config.ui.model_position.display_relative = {
+            x: relativeX,
+            y: relativeY
+        };
         this.config.ui.model_position.x = relativeX;
         this.config.ui.model_position.y = relativeY;
 
-        // 发送IPC消息保存位置
-        ipcRenderer.send('save-model-position', {
-            x: relativeX,
-            y: relativeY,
-            scale:this.model.scale.x
+        console.log('[multi-monitor] saving model position:', {
+            localPosition: { x: this.model.x, y: this.model.y },
+            windowLocalPosition: modelWindowPosition,
+            relativePosition: { x: relativeX, y: relativeY },
+            scale: this.model.scale.x
         });
 
-        console.log('保存模型位置:', { x: relativeX, y: relativeY });
+        // 发送IPC消息保存位置
+        ipcRenderer.send('save-model-position', {
+            localX: modelWindowPosition.x,
+            localY: modelWindowPosition.y,
+            scale:this.model.scale.x
+        });
+    }
+
+    async maybeTransferAcrossDisplays(pointerPosition) {
+        const now = Date.now();
+        if (this.crossDisplayTransferInFlight || now - this.lastCrossDisplayTransferAt < this.crossDisplayTransferCooldownMs) {
+            return;
+        }
+
+        const pointerWindowPosition = this.toWindowPixels(pointerPosition);
+        const direction = this.resolveCrossDisplayDirection(pointerWindowPosition);
+        if (!direction) {
+            return;
+        }
+
+        console.log('[multi-monitor] edge reached, requesting transfer:', {
+            direction,
+            pointerPosition,
+            pointerWindowPosition,
+            windowSize: { width: window.innerWidth, height: window.innerHeight },
+            modelPosition: { x: this.model.x, y: this.model.y }
+        });
+
+        this.crossDisplayTransferInFlight = true;
+        try {
+            const result = await ipcRenderer.invoke('transfer-model-to-display', {
+                direction,
+                localPointer: {
+                    x: pointerWindowPosition.x,
+                    y: pointerWindowPosition.y
+                }
+            });
+
+            console.log('[multi-monitor] transfer response:', result);
+
+            if (result && result.success && result.localPointer) {
+                this.model.position.set(
+                    result.localPointer.x - this.dragOffset.x,
+                    result.localPointer.y - this.dragOffset.y
+                );
+                this.clampModelToVisibleArea('transfer');
+                this.updateInteractionArea();
+                this.lastCrossDisplayTransferAt = Date.now();
+                console.log('[multi-monitor] transfer applied in renderer:', {
+                    newPointer: result.localPointer,
+                    dragOffset: this.dragOffset,
+                    modelPosition: { x: this.model.x, y: this.model.y }
+                });
+            }
+        } catch (error) {
+            console.warn('跨显示器迁移失败:', error);
+        } finally {
+            this.crossDisplayTransferInFlight = false;
+        }
+    }
+
+    resolveCrossDisplayDirection(pointerPosition) {
+        if (pointerPosition.x <= this.crossDisplayEdgeThreshold) {
+            return 'left';
+        }
+        if (pointerPosition.x >= window.innerWidth - this.crossDisplayEdgeThreshold) {
+            return 'right';
+        }
+        if (pointerPosition.y <= this.crossDisplayEdgeThreshold) {
+            return 'up';
+        }
+        if (pointerPosition.y >= window.innerHeight - this.crossDisplayEdgeThreshold) {
+            return 'down';
+        }
+
+        return null;
+    }
+
+    clampModelToVisibleArea(reason = 'unknown') {
+        if (!this.model) {
+            return;
+        }
+
+        const minVisibleWidth = 100;
+        const minVisibleHeight = 100;
+        const minX = -this.model.width + minVisibleWidth;
+        const maxX = window.innerWidth - minVisibleWidth;
+        const minY = -this.model.height + minVisibleHeight;
+        const maxY = window.innerHeight - minVisibleHeight;
+
+        const clampedX = Math.max(minX, Math.min(this.model.x, maxX));
+        const clampedY = Math.max(minY, Math.min(this.model.y, maxY));
+
+        if (clampedX !== this.model.x || clampedY !== this.model.y) {
+            console.log('[multi-monitor] clamped model position:', {
+                reason,
+                before: { x: this.model.x, y: this.model.y },
+                after: { x: clampedX, y: clampedY },
+                bounds: { minX, maxX, minY, maxY }
+            });
+            this.model.position.set(clampedX, clampedY);
+        }
     }
 }
 

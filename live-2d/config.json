@@ -59,7 +59,7 @@
       "model": "FunAudioLLM/CosyVoice2-0.5B",
       "voice": "speech:fake-neuro:j3qz9ij4k2:kquiiycgizgaoxeujypx",
       "response_format": "wav",
-      "speed": 1.0
+      "speed": 1
     },
     "baidu_asr": {
       "enabled": false,
@@ -85,9 +85,22 @@
     "auto_show_chat_on_text_mode": true,
     "hide_from_screenshot": true,
     "model_position": {
-      "x": 1.2534382152557373,
-      "y": 1.176663283515905,
-      "remember_position": true
+      "remember_position": true,
+      "display_id": 2779098405,
+      "display_relative": {
+        "x": 0.4734375,
+        "y": 0.16686954941860468
+      },
+      "desktop_global": {
+        "x": 909,
+        "y": 172.20937500000002
+      },
+      "display_snapshot": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1032
+      }
     }
   },
   "context": {

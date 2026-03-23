@@ -4,10 +4,14 @@ const fs = require('fs')
 const { HttpServer } = require('./js/services/http-server')
 const { ModelPathUpdater } = require('./js/model/model-path-updater')
 const { ShortcutManager } = require('./js/shortcut-manager')
+const { DisplayTopologyService } = require('./js/main/display-topology-service')
+const { WindowPlacementService } = require('./js/main/window-placement-service')
 const screenshot = require('screenshot-desktop');
 
 // 添加配置文件路径
 const configPath = path.join(app.getAppPath(), 'config.json');
+const displayTopologyService = new DisplayTopologyService(screen);
+const windowPlacementService = new WindowPlacementService(displayTopologyService);
 
 // Live2D模型优先级配置（Python程序会修改这个列表来切换模型）
 const priorityFolders = ['肥牛', 'Hiyouri', 'Default', 'Main'];
@@ -19,12 +23,24 @@ function ensureTopMost(win) {
     }
 }
 
+function loadSavedModelPosition() {
+    try {
+        const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        return configData?.ui?.model_position || null;
+    } catch (error) {
+        return null;
+    }
+}
+
 function createWindow () {
-    const primaryDisplay = screen.getPrimaryDisplay()
-    const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize
+    const savedModelPosition = loadSavedModelPosition()
+    const initialDisplay = windowPlacementService.resolveInitialDisplay(savedModelPosition)
+    const initialBounds = windowPlacementService.buildWindowBounds(initialDisplay)
     const win = new BrowserWindow({
-        width: screenWidth,
-        height: screenHeight,
+        width: initialBounds.width,
+        height: initialBounds.height,
+        x: initialBounds.x,
+        y: initialBounds.y,
         transparent: true,
         frame: false,
         alwaysOnTop: true,
@@ -47,17 +63,17 @@ function createWindow () {
     win.setAlwaysOnTop(true, 'screen-saver')
     win.setIgnoreMouseEvents(true, { forward: true });
     win.setMenu(null)
-    win.setPosition(0, 0)
     win.loadFile('index.html')
     win.on('minimize', (event) => {
         event.preventDefault()
         win.restore()
     })
     win.on('will-move', (event, newBounds) => {
-        const { width, height } = primaryDisplay.workAreaSize
-        if (newBounds.x < 0 || newBounds.y < 0 || 
-            newBounds.x + newBounds.width > width || 
-            newBounds.y + newBounds.height > height) {
+        const currentDisplay = displayTopologyService.getDisplayForWindow(win)
+        const workArea = currentDisplay.workArea
+        if (newBounds.x < workArea.x || newBounds.y < workArea.y || 
+            newBounds.x + newBounds.width > workArea.x + workArea.width || 
+            newBounds.y + newBounds.height > workArea.y + workArea.height) {
             event.preventDefault()
         }
     })
@@ -105,12 +121,18 @@ app.on('activate', () => {
 ipcMain.on('window-move', (event, { mouseX, mouseY }) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     const [currentX, currentY] = win.getPosition()
-    const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize
+    const currentDisplay = displayTopologyService.getDisplayForWindow(win)
+    const workArea = currentDisplay.workArea
     let newX = currentX + mouseX
     let newY = currentY + mouseY
-    newX = Math.max(-win.getBounds().width + 100, Math.min(newX, screenWidth - 100))
-    newY = Math.max(-win.getBounds().height + 100, Math.min(newY, screenHeight - 100))
+    newX = Math.max(workArea.x - win.getBounds().width + 100, Math.min(newX, workArea.x + workArea.width - 100))
+    newY = Math.max(workArea.y - win.getBounds().height + 100, Math.min(newY, workArea.y + workArea.height - 100))
     win.setPosition(newX, newY)
+})
+
+ipcMain.handle('transfer-model-to-display', async (event, payload) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return windowPlacementService.transferWindowToDisplay(win, payload)
 })
 
 ipcMain.on('set-ignore-mouse-events', (event, { ignore, options }) => {
@@ -293,6 +315,7 @@ ipcMain.on('save-model-position', (event, position) => {
     try {
         // 读取当前配置
         const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        const win = BrowserWindow.fromWebContents(event.sender)
 
         // 更新位置信息
         if (!configData.ui) {
@@ -306,9 +329,16 @@ ipcMain.on('save-model-position', (event, position) => {
             };
         }
 
-        configData.ui.model_position.x = position.x;
-        configData.ui.model_position.y = position.y;
-        configData.ui.model_scale = position.scale;
+        const savedPosition = windowPlacementService.buildModelPositionPayload(win, position)
+
+        configData.ui.model_position = {
+            remember_position: true,
+            display_id: savedPosition.display_id,
+            display_relative: savedPosition.display_relative,
+            desktop_global: savedPosition.desktop_global,
+            display_snapshot: savedPosition.display_snapshot
+        };
+        configData.ui.model_scale = savedPosition.scale;
 
         // 保存到文件
         fs.writeFileSync(configPath, JSON.stringify(configData, null, 2), 'utf8');
