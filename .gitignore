@@ -32,4 +32,5 @@ full-hub/tts-hub
 
 runtime.logfull-hub/ 
 
-
+# 忽略参考项目文件夹
+reference-projects
