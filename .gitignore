@@ -34,3 +34,12 @@ runtime.logfull-hub/
 
 # 忽略参考项目文件夹
 reference-projects
+
+# 文档目录管理：
+# 正式文档纳入版本控制，仅忽略本地缓存、导出物和临时文件
+document/local/
+document/exports/
+document/tmp/
+document/archive/tmp/
+document/**/~$*
+document/**/*.tmp
