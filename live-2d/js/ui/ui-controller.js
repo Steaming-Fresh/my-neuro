@@ -24,11 +24,12 @@ class UIController {
 
     // 设置鼠标穿透
     setupMouseIgnore() {
-        const updateMouseIgnore = () => {
-            if (!global.currentModel) return;
+        const updateMouseIgnore = (event) => {
+            if (!global.modelController) return;
 
-            const shouldIgnore = !global.currentModel.containsPoint(
-                global.pixiApp.renderer.plugins.interaction.mouse.global
+            const shouldIgnore = !global.modelController.isInteractiveClientPoint(
+                event.clientX,
+                event.clientY
             );
             ipcRenderer.send('set-ignore-mouse-events', {
                 ignore: shouldIgnore,
