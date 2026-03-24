@@ -1,4 +1,5 @@
 const { ipcRenderer } = require('electron');
+const { ModelHitTestService } = require('./model-hit-test-service');
 
 // 模型交互控制器类
 class ModelInteractionController {
@@ -18,6 +19,7 @@ class ModelInteractionController {
         this.lastCrossDisplayTransferAt = 0;
         this.crossDisplayTransferCooldownMs = 300;
         this.crossDisplayEdgeThreshold = 32;
+        this.hitTestService = new ModelHitTestService();
     }
 
     // 初始化模型和应用
@@ -25,18 +27,45 @@ class ModelInteractionController {
         this.model = model;
         this.app = app;
         this.config = config;
+        this.hitTestService.setConfig(config);
+        this.hitTestService.init(model, app, config);
         this.updateInteractionArea();
         this.setupInteractivity();
     }
 
+    getCurrentModelBounds() {
+        if (!this.model || typeof this.model.getBounds !== 'function') {
+            return null;
+        }
+
+        try {
+            const bounds = this.model.getBounds();
+            if (!bounds) {
+                return null;
+            }
+
+            return {
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height
+            };
+        } catch (error) {
+            return null;
+        }
+    }
+
     // 更新交互区域大小和位置
     updateInteractionArea() {
-        if (!this.model) return;
-        
-        this.interactionWidth = this.model.width / 3;
-        this.interactionHeight = this.model.height * 0.7;
-        this.interactionX = this.model.x + (this.model.width - this.interactionWidth) / 2;
-        this.interactionY = this.model.y + (this.model.height - this.interactionHeight) / 2;
+        const bounds = this.getCurrentModelBounds();
+        if (!bounds) {
+            return;
+        }
+
+        this.interactionWidth = bounds.width;
+        this.interactionHeight = bounds.height;
+        this.interactionX = bounds.x;
+        this.interactionY = bounds.y;
     }
 
     getCanvasMetrics() {
@@ -73,55 +102,29 @@ class ModelInteractionController {
         return this.toWindowPixels({ x: this.model.x, y: this.model.y });
     }
 
+    hitTestPoint(point, { includeChat = false } = {}) {
+        if (!this.hitTestService) {
+            return false;
+        }
+
+        return this.hitTestService.containsInteractivePoint(point, { includeChat });
+    }
+
     // 设置交互性
     setupInteractivity() {
         if (!this.model) return;
-        
+
         this.model.interactive = true;
 
-        // 覆盖原始的containsPoint方法，自定义交互区域
-        const originalContainsPoint = this.model.containsPoint;
+        const originalContainsPoint = typeof this.model.containsPoint === 'function'
+            ? this.model.containsPoint.bind(this.model)
+            : null;
+        this.hitTestService.setFallbackContainsPoint(originalContainsPoint);
+
+        // 覆盖原始的containsPoint方法，改为基于真实可见像素命中
         this.model.containsPoint = (point) => {
-            
-            const isOverModel = (
-                currentModel && // 确保模型已加载
-                point.x >= this.interactionX &&
-                point.x <= this.interactionX + this.interactionWidth &&
-                point.y >= this.interactionY &&
-                point.y <= this.interactionY + this.interactionHeight
-            );
-
-            // // 检查是否在聊天框内
-            const chatContainer = document.getElementById('text-chat-container');
-            if (!chatContainer) return isOverModel; // 如果聊天框不存在，仅检查模型
-
-            // 获取PIXI应用的view(DOM canvas元素)
-            const pixiView = this.app.renderer.view;
-    
-            // 计算canvas在页面中的位置
-            const canvasRect = pixiView.getBoundingClientRect();
-    
-            // 获取聊天框的DOM位置
-            const chatRect = chatContainer.getBoundingClientRect();
-    
-            // 将DOM坐标转换为PIXI坐标
-            const chatLeftInPixi = (chatRect.left - canvasRect.left) * (pixiView.width / canvasRect.width);
-            const chatRightInPixi = (chatRect.right - canvasRect.left) * (pixiView.width / canvasRect.width);
-            const chatTopInPixi = (chatRect.top - canvasRect.top) * (pixiView.height / canvasRect.height);
-            const chatBottomInPixi = (chatRect.bottom - canvasRect.top) * (pixiView.height / canvasRect.height);
-
-            // const chatRect = chatContainer.getBoundingClientRect();
-            const isOverChat = (
-                point.x >= chatLeftInPixi &&
-                point.x <= chatRightInPixi &&
-                point.y >= chatTopInPixi &&
-                point.y <= chatBottomInPixi
-            );
-
-            
-            return isOverModel || isOverChat;
+            return this.hitTestService.containsInteractivePoint(point, { includeChat: true });
         };
-        
 
         // 鼠标按下事件
         this.model.on('mousedown', (e) => {
@@ -141,7 +144,6 @@ class ModelInteractionController {
                     ignore: false
                 });
             }
-            
         });
 
         // 鼠标移动事件
@@ -163,7 +165,6 @@ class ModelInteractionController {
                     windowModelPosition: this.modelPositionToWindowPixels()
                 });
                 this.isDragging = false;
-                // 保存模型位置
                 this.saveModelPosition();
                 setTimeout(() => {
                     if (!this.model.containsPoint(this.app.renderer.plugins.interaction.mouse.global)) {
@@ -178,33 +179,28 @@ class ModelInteractionController {
 
         const chatContainer = document.getElementById('text-chat-container');
 
-        // 鼠标按下时开始拖动
-        chatContainer.addEventListener('mousedown', (e) => {
-            // 仅当点击聊天框背景或消息区域时触发拖动（避免误触输入框和按钮）
-            if (e.target === chatContainer || e.target.id === 'chat-messages') {
-                this.isDraggingChat = true;
-                this.chatDragOffset.x = e.clientX - chatContainer.getBoundingClientRect().left;
-                this.chatDragOffset.y = e.clientY - chatContainer.getBoundingClientRect().top;
-                e.preventDefault(); // 防止文本选中
-                ipcRenderer.send('set-ignore-mouse-events', {
-                    ignore: false
-                });
-                
-            }
-        });
+        if (chatContainer) {
+            chatContainer.addEventListener('mousedown', (e) => {
+                if (e.target === chatContainer || e.target.id === 'chat-messages') {
+                    this.isDraggingChat = true;
+                    this.chatDragOffset.x = e.clientX - chatContainer.getBoundingClientRect().left;
+                    this.chatDragOffset.y = e.clientY - chatContainer.getBoundingClientRect().top;
+                    e.preventDefault();
+                    ipcRenderer.send('set-ignore-mouse-events', {
+                        ignore: false
+                    });
+                }
+            });
+        }
 
-        // 鼠标移动时更新位置
         document.addEventListener('mousemove', (e) => {
-            if (this.isDraggingChat) {
+            if (this.isDraggingChat && chatContainer) {
                 chatContainer.style.left = `${e.clientX - this.chatDragOffset.x}px`;
                 chatContainer.style.top = `${e.clientY - this.chatDragOffset.y}px`;
-                // 注意: 拖动聊天框时不需要修改模型位置
             }
         });
 
-        // 鼠标释放时停止拖动
         document.addEventListener('mouseup', () => {
-            // this.isDraggingChat = false;
             if (this.isDraggingChat) {
                 this.isDraggingChat = false;
                 setTimeout(() => {
@@ -218,26 +214,6 @@ class ModelInteractionController {
             }
         });
 
-
-// 拖动结束时，再次检查穿透状态
-// window.addEventListener('mouseup', () => {
-//     if (this.isDraggingChat) {
-//         this.isDraggingChat = false;
-//         this.updateMouseIgnore(); // 确保拖动结束后状态正确
-//     }
-// });
-
-// 鼠标离开事件
-// document.addEventListener('mouseout', () => {
-//     if (!this.isDraggingChat) {
-//         ipcRenderer.send('set-ignore-mouse-events', {
-//             ignore: true,
-//             options: { forward: true }
-//         });
-//     }
-// });
-
-        // 鼠标悬停事件
         this.model.on('mouseover', () => {
             if (this.model.containsPoint(this.app.renderer.plugins.interaction.mouse.global)) {
                 ipcRenderer.send('set-ignore-mouse-events', {
@@ -246,7 +222,6 @@ class ModelInteractionController {
             }
         });
 
-        // 鼠标离开事件
         this.model.on('mouseout', () => {
             if (!this.isDragging) {
                 ipcRenderer.send('set-ignore-mouse-events', {
@@ -256,15 +231,14 @@ class ModelInteractionController {
             }
         });
 
-        // 鼠标点击事件
         this.model.on('click', () => {
             if (this.model.containsPoint(this.app.renderer.plugins.interaction.mouse.global) && this.model.internalModel) {
-                this.model.motion("Tap");
+                this.model.motion('Tap');
                 this.model.expression();
+                this.hitTestService.markCacheDirty('tap-motion');
             }
         });
 
-        // 鼠标滚轮事件（缩放功能）
         window.addEventListener('wheel', (e) => {
             if (this.model.containsPoint(this.app.renderer.plugins.interaction.mouse.global)) {
                 e.preventDefault();
@@ -287,12 +261,12 @@ class ModelInteractionController {
                     this.model.x -= deltaWidth / 2;
                     this.model.y -= deltaHeight / 2;
                     this.updateInteractionArea();
+                    this.hitTestService.markCacheDirty('scale');
                     this.saveModelPosition();
                 }
             }
         }, { passive: false });
 
-        // 窗口大小改变事件
         window.addEventListener('resize', () => {
             if (this.app && this.app.renderer) {
                 console.log('[multi-monitor] renderer resize:', {
@@ -305,23 +279,21 @@ class ModelInteractionController {
                 this.app.stage.position.set(window.innerWidth / 2, window.innerHeight / 2);
                 this.app.stage.pivot.set(window.innerWidth / 2, window.innerHeight / 2);
                 this.updateInteractionArea();
+                this.hitTestService.markCacheDirty('resize');
             }
         });
 
-        // 禁用右键菜单，防止右键点击导致意外行为
         window.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             return false;
         });
 
-        // 在模型上也禁用右键菜单
         this.model.on('rightdown', (e) => {
             e.stopPropagation();
         });
     }
 
-
-   // 设置嘴部动画
+    // 设置嘴部动画
     setMouthOpenY(v) {
         if (!this.model) return;
 
@@ -329,7 +301,6 @@ class ModelInteractionController {
             v = Math.max(0, Math.min(v, 3.0));
             const coreModel = this.model.internalModel.coreModel;
 
-            // 同时尝试所有可能的组合，不要return，让所有的都执行
             try {
                 coreModel.setParameterValueById('PARAM_MOUTH_OPEN_Y', v);
             } catch (e) {}
@@ -355,16 +326,12 @@ class ModelInteractionController {
     setupInitialModelProperties(scaleMultiplier = 2.3) {
         if (!this.model || !this.app) return;
 
-        // const scaleX = (window.innerWidth * scaleMultiplier) / this.model.width;
-        // const scaleY = (window.innerHeight * scaleMultiplier) / this.model.height;
         this.model.scale.set(scaleMultiplier);
 
-        // 检查是否有保存的位置
         if (this.config && this.config.ui && this.config.ui.model_position && this.config.ui.model_position.remember_position) {
             const savedPos = this.config.ui.model_position;
             const relativePosition = savedPos.display_relative || savedPos;
             if (relativePosition.x !== null && relativePosition.y !== null) {
-                // 使用保存的位置（相对显示器工作区的比例转换为当前窗口局部坐标）
                 this.model.x = relativePosition.x * window.innerWidth;
                 this.model.y = relativePosition.y * window.innerHeight;
                 console.log('[multi-monitor] restored model position:', {
@@ -373,25 +340,50 @@ class ModelInteractionController {
                     windowSize: { width: window.innerWidth, height: window.innerHeight }
                 });
             } else {
-                // 使用默认位置
                 this.model.y = window.innerHeight * 0.8;
                 this.model.x = window.innerWidth * 1.35;
             }
         } else {
-            // 使用默认位置
             this.model.y = window.innerHeight * 0.8;
             this.model.x = window.innerWidth * 1.35;
         }
 
         this.clampModelToVisibleArea('initial-restore');
+        this.ensureModelVisibleOnStartup();
         this.updateInteractionArea();
+        this.hitTestService.markCacheDirty('initial-restore');
+    }
+
+    ensureModelVisibleOnStartup() {
+        if (!this.model || typeof this.model.getBounds !== 'function') {
+            return;
+        }
+
+        const bounds = this.getCurrentModelBounds();
+        if (!bounds) {
+            return;
+        }
+
+        const isVisible = bounds.x < window.innerWidth &&
+            bounds.x + bounds.width > 0 &&
+            bounds.y < window.innerHeight &&
+            bounds.y + bounds.height > 0;
+
+        if (isVisible) {
+            return;
+        }
+
+        console.warn('[live2d] model restored outside viewport, applying startup recovery:', bounds);
+        this.model.scale.set(this.config?.ui?.model_scale || 2.3);
+        this.model.x = window.innerWidth * 1.35;
+        this.model.y = window.innerHeight * 0.8;
+        this.clampModelToVisibleArea('startup-recovery');
     }
 
     // 保存模型位置到配置文件
     saveModelPosition() {
         if (!this.model || !this.config) return;
 
-        // 检查是否启用位置记忆
         if (!this.config.ui || !this.config.ui.model_position || !this.config.ui.model_position.remember_position) {
             return;
         }
@@ -402,7 +394,6 @@ class ModelInteractionController {
         const relativeX = modelWindowPosition.x / window.innerWidth;
         const relativeY = modelWindowPosition.y / window.innerHeight;
 
-        // 更新配置对象，兼容新旧结构
         this.config.ui.model_position.display_relative = {
             x: relativeX,
             y: relativeY
@@ -417,11 +408,10 @@ class ModelInteractionController {
             scale: this.model.scale.x
         });
 
-        // 发送IPC消息保存位置
         ipcRenderer.send('save-model-position', {
             localX: modelWindowPosition.x,
             localY: modelWindowPosition.y,
-            scale:this.model.scale.x
+            scale: this.model.scale.x
         });
     }
 
@@ -518,6 +508,7 @@ class ModelInteractionController {
                 bounds: { minX, maxX, minY, maxY }
             });
             this.model.position.set(clampedX, clampedY);
+            this.updateInteractionArea();
         }
     }
 }

@@ -80,24 +80,16 @@ class ModelSetup {
 
     // 设置模型碰撞检测
     static setupHitTest(model, modelController) {
-        // 从modelController获取交互区域（如果有的话）
-        // 注意：这里假设modelController有interactionX等属性
-        // 如果没有，可能需要从其他地方获取或使用默认值
-        const getInteractionBounds = () => {
-            if (modelController.interactionX !== undefined) {
-                return {
-                    x: modelController.interactionX,
-                    y: modelController.interactionY,
-                    width: modelController.interactionWidth,
-                    height: modelController.interactionHeight
-                };
-            }
-            // 默认值（如果modelController没有定义这些属性）
-            return { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight };
-        };
-
         model.hitTest = function(x, y) {
-            const bounds = getInteractionBounds();
+            if (modelController && typeof modelController.hitTestPoint === 'function') {
+                return modelController.hitTestPoint({ x, y });
+            }
+
+            if (typeof model.getBounds !== 'function') {
+                return false;
+            }
+
+            const bounds = model.getBounds();
             return x >= bounds.x &&
                 x <= bounds.x + bounds.width &&
                 y >= bounds.y &&
@@ -107,3 +99,4 @@ class ModelSetup {
 }
 
 module.exports = { ModelSetup };
+

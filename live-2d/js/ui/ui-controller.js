@@ -20,12 +20,38 @@ class UIController {
     initialize() {
         this.setupMouseIgnore();
         this.setupChatBoxEvents();
+        this.setupControlPanel();
     }
 
     // 设置鼠标穿透
     setupMouseIgnore() {
-        const updateMouseIgnore = () => {
+        const isPointInElement = (clientX, clientY, element) => {
+            if (!element) return false;
+            const style = window.getComputedStyle(element);
+            if (style.display === 'none' || style.visibility === 'hidden') {
+                return false;
+            }
+
+            const rect = element.getBoundingClientRect();
+            return clientX >= rect.left &&
+                clientX <= rect.right &&
+                clientY >= rect.top &&
+                clientY <= rect.bottom;
+        };
+
+        const updateMouseIgnore = (event) => {
             if (!global.currentModel) return;
+
+            const clientX = event?.clientX;
+            const clientY = event?.clientY;
+            const modelControls = document.getElementById('model-controls');
+            if (Number.isFinite(clientX) && Number.isFinite(clientY) && isPointInElement(clientX, clientY, modelControls)) {
+                ipcRenderer.send('set-ignore-mouse-events', {
+                    ignore: false,
+                    options: { forward: false }
+                });
+                return;
+            }
 
             const shouldIgnore = !global.currentModel.containsPoint(
                 global.pixiApp.renderer.plugins.interaction.mouse.global
@@ -44,6 +70,7 @@ class UIController {
         const chatInput = document.getElementById('chat-input');
         const textChatContainer = document.getElementById('text-chat-container');
         const submitBtn = document.getElementById('chat-send-btn');
+        const modelControls = document.getElementById('model-controls');
 
         if (!chatInput || !textChatContainer || !submitBtn) return;
 
@@ -74,7 +101,98 @@ class UIController {
                 options: { forward: true }
             });
         });
+
+        if (modelControls) {
+            modelControls.addEventListener('mouseenter', () => {
+                ipcRenderer.send('set-ignore-mouse-events', {
+                    ignore: false,
+                    options: { forward: false }
+                });
+            });
+
+            modelControls.addEventListener('mouseleave', () => {
+                ipcRenderer.send('set-ignore-mouse-events', {
+                    ignore: true,
+                    options: { forward: true }
+                });
+            });
+        }
         
+    }
+
+    setupControlPanel() {
+        const modelControls = document.getElementById('model-controls');
+        const panelButtons = document.getElementById('panel-buttons');
+        const toggleBtn = document.getElementById('btn-toggle-panel');
+        const resetBtn = document.getElementById('btn-reset-position');
+        const gazeBtn = document.getElementById('btn-toggle-gaze');
+        const renderBtn = document.getElementById('btn-toggle-render');
+        const vmcBtn = document.getElementById('btn-toggle-vmc');
+        const clickThroughBtn = document.getElementById('btn-click-through');
+
+        if (!modelControls || !panelButtons || !toggleBtn) {
+            return;
+        }
+
+        modelControls.style.display = 'flex';
+        ipcRenderer.send('set-ignore-mouse-events', {
+            ignore: false,
+            options: { forward: false }
+        });
+
+        // Live2D 模式下先只保留“重置位置”这一项，避免展示未接线的 VRM 专属按钮。
+        [gazeBtn, renderBtn, vmcBtn, clickThroughBtn].forEach((button) => {
+            if (button) {
+                button.style.display = 'none';
+            }
+        });
+
+        if (resetBtn) {
+            resetBtn.style.display = '';
+            resetBtn.title = '重置 Live2D 位置';
+        }
+
+        toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            ipcRenderer.send('set-ignore-mouse-events', {
+                ignore: false,
+                options: { forward: false }
+            });
+            const isExpanded = panelButtons.classList.toggle('expanded');
+            toggleBtn.textContent = isExpanded ? '✕' : '⚙';
+            toggleBtn.title = isExpanded ? '收起面板' : '展开面板';
+        });
+
+        if (resetBtn) {
+            resetBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+
+                const model = global.currentModel;
+                const modelController = global.modelController;
+                if (!model || !modelController) {
+                    return;
+                }
+
+                model.x = window.innerWidth * 0.5;
+                model.y = window.innerHeight * 0.62;
+
+                if (this.config?.ui?.model_scale) {
+                    model.scale.set(this.config.ui.model_scale);
+                }
+
+                modelController.clampModelToVisibleArea('control-panel-reset');
+                modelController.updateInteractionArea();
+                if (modelController.hitTestService) {
+                    modelController.hitTestService.markCacheDirty('control-panel-reset');
+                }
+                modelController.saveModelPosition();
+
+                ipcRenderer.send('set-ignore-mouse-events', {
+                    ignore: false,
+                    options: { forward: false }
+                });
+            });
+        }
     }
 
     // 显示字幕

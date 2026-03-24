@@ -81,15 +81,20 @@
     "model_type": "live2d",
     "vrm_model": "",
     "vrm_model_path": "",
-    "model_scale": 0.6592945326814194,
+    "model_scale": 2.3,
     "show_chat_box": true,
     "show_model": true,
     "text_only_mode": false,
     "auto_show_chat_on_text_mode": true,
     "hide_from_screenshot": true,
+    "adaptive_hit_test_enabled": true,
+    "hit_test_debug_enabled": false,
+    "hit_test_alpha_threshold": 32,
+    "hit_test_sample_radius": 1,
+    "hit_test_cache_ttl_ms": 120,
     "model_position": {
-      "x": 1.3192581489183488,
-      "y": 0.5715708406376147,
+      "x": 0.5,
+      "y": 0.62,
       "remember_position": true
     }
   },
